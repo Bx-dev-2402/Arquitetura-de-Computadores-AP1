@@ -8,12 +8,11 @@
     B  = confirmar instrução
     C  = espaço entre opcode e operando
     D  = apagar último caractere
-    0  = (fora do LOAD) Liga/desliga sensor automático de buzzer
-                        OU para o streaming de distância (READ)
+    0  = liga/desliga sensor contínuo + buzzer automático
 
   OPCODES:
     0  NOP
-    1  READ     -> inicia streaming de distância no Serial (para com 0)
+    1  READ
     2  LOADK
     3  ADDK
     4  SUBK
@@ -40,19 +39,18 @@
   Ligar buzzer:
     # 8 B 15 B # A * *
 
-  Ler sensor e mostrar no display (streaming):
-    # 1 B 10 B 15 B # A *
-    -> Fica enviando distancia no Serial. Pressione 0 para parar.
+  Ler sensor e mostrar no display UMA VEZ:
+    # 1 B 10 B 15 B # A * * *
 
-  Ligar sensor de buzzer automatico:
-    Pressione 0 fora do LOAD para ligar/desligar.
-    O buzzer dispara quando a distancia for menor que 10 cm.
+  Sensor contínuo + buzzer automático:
+    Aperte 0 fora do LOAD para ligar/desligar.
 */
 
 // ============================================================
 // CONFIGURAÇÃO DO DISPLAY
 // ============================================================
 
+// Se o display ficar invertido/apagado, troque true por false.
 const bool DISPLAY_ANODO_COMUM = true;
 
 // ============================================================
@@ -92,6 +90,7 @@ char teclas[ROWS][COLS] = {
   {'*', '0', '#', 'D'}
 };
 
+// Teclado nos pinos 30 a 37
 byte rowPins[ROWS] = {30, 31, 32, 33};
 byte colPins[COLS] = {34, 35, 36, 37};
 
@@ -145,21 +144,24 @@ int tamPrograma = 0;
 
 bool modoLOAD = false;
 bool modoRUN = false;
-bool sensorAtivo = false;
-
-// ============================================================
-// STREAMING DE DISTÂNCIA (READ contínuo)
-// ============================================================
-bool sensorStream = false;
-unsigned long ultimaLeituraStream = 0;
-const unsigned long intervaloStream = 300;
 
 String bufferEntrada = "";
 
+// Sensor contínuo controlado pela tecla 0
+bool sensorContinuo = false;
+
+// Controle de tempo do sensor contínuo
 unsigned long ultimaLeituraSensor = 0;
-const unsigned long intervaloSensor = 300;
+const unsigned long intervaloSensor = 500;
+
+// ============================================================
+// PROTÓTIPOS
+// ============================================================
 
 void inicializarHardware();
+
+void atualizarSensorSerial();
+
 void mostrarDisplay(int valor);
 void apagarDisplay();
 void displayLetraE();
@@ -188,6 +190,10 @@ void printOK(const __FlashStringHelper* msg);
 void printErro(const __FlashStringHelper* msg);
 void printInfo(const __FlashStringHelper* msg);
 
+// ============================================================
+// SETUP
+// ============================================================
+
 void setup() {
   Serial.begin(9600);
   delay(1000);
@@ -206,54 +212,17 @@ void setup() {
   imprimirAjuda();
 }
 
+// ============================================================
+// LOOP PRINCIPAL
+// ============================================================
+
 void loop() {
-
   // --------------------------------------------------------
-  // SENSOR AUTOMÁTICO: buzzer dispara quando < 10 cm
+  // SENSOR CONTÍNUO
+  // Só fica atualizando no Serial quando apertar 0
   // --------------------------------------------------------
-  if (sensorAtivo) {
-    unsigned long agora = millis();
-
-    if (agora - ultimaLeituraSensor >= intervaloSensor) {
-      ultimaLeituraSensor = agora;
-
-      int d = lerDistancia();
-
-      Serial.print(F("[SENSOR] Distancia: "));
-      Serial.print(d);
-      Serial.print(F(" cm | Buzzer: "));
-
-      if (d < 10) {
-        digitalWrite(BUZZER, HIGH);
-        Serial.println(F("LIGADO"));
-      } else {
-        digitalWrite(BUZZER, LOW);
-        Serial.println(F("desligado"));
-      }
-    }
-  }
-
-  // --------------------------------------------------------
-  // STREAMING DE DISTÂNCIA (READ contínuo)
-  // Ativado pelo OP_READ. Desativado pela tecla 0.
-  // Range válido: 1 a 400 cm
-  // --------------------------------------------------------
-  if (sensorStream) {
-    unsigned long agora = millis();
-
-    if (agora - ultimaLeituraStream >= intervaloStream) {
-      ultimaLeituraStream = agora;
-
-      int d = lerDistancia();
-
-      if (d >= 1 && d <= 400) {
-        Serial.print(F("[READ] Distancia: "));
-        Serial.print(d);
-        Serial.println(F(" cm"));
-      } else {
-        Serial.println(F("[READ] Fora do range (1-400 cm)"));
-      }
-    }
+  if (sensorContinuo) {
+    atualizarSensorSerial();
   }
 
   char tecla = keypad.getKey();
@@ -266,37 +235,35 @@ void loop() {
   Serial.println(tecla);
 
   // --------------------------------------------------------
-  // Tecla 0: para streaming de distância OU liga/desliga
-  //          sensor de buzzer automático (fora do LOAD)
+  // Tecla 0: liga/desliga sensor contínuo + buzzer automático
+  // Fora do LOAD
   // --------------------------------------------------------
   if (tecla == '0' && !modoLOAD) {
+    sensorContinuo = !sensorContinuo;
 
-    if (sensorStream) {
-      sensorStream = false;
-      printInfo(F("Streaming de distancia PARADO."));
-      return;
-    }
-
-    sensorAtivo = !sensorAtivo;
-
-    if (sensorAtivo) {
-      printInfo(F("Sensor de buzzer LIGADO. Buzzer dispara em < 10 cm."));
+    if (sensorContinuo) {
+      printInfo(F("Sensor continuo LIGADO. Distancia aparecera no Serial."));
+      printInfo(F("Buzzer dispara quando distancia < 10 cm."));
     } else {
       desligarBuzzer();
-      printInfo(F("Sensor de buzzer DESLIGADO."));
+      printInfo(F("Sensor continuo DESLIGADO."));
     }
 
     return;
   }
 
+  // --------------------------------------------------------
   // # entra ou sai do modo LOAD
+  // --------------------------------------------------------
   if (tecla == '#') {
     if (!modoLOAD) {
       modoLOAD = true;
       modoRUN = false;
       EXECUTANDO = false;
-      sensorAtivo = false;
-      sensorStream = false;
+
+      // Ao entrar no LOAD, desligamos o modo contínuo
+      // para não misturar as leituras com a digitação.
+      sensorContinuo = false;
       desligarBuzzer();
 
       tamPrograma = 0;
@@ -359,7 +326,9 @@ void loop() {
     return;
   }
 
+  // --------------------------------------------------------
   // A inicia RUN
+  // --------------------------------------------------------
   if (tecla == 'A') {
     if (modoLOAD) {
       printErro(F("Saia do LOAD antes de RUN. Pressione #."));
@@ -370,16 +339,12 @@ void loop() {
     return;
   }
 
+  // --------------------------------------------------------
   // * executa uma instrução por vez
+  // --------------------------------------------------------
   if (tecla == '*') {
     if (modoLOAD) {
       printInfo(F("Tecla * ignorada no modo LOAD."));
-      return;
-    }
-
-    // Se o streaming estiver ativo, ignora o *
-    if (sensorStream) {
-      printInfo(F("Streaming ativo. Pressione 0 para parar antes de continuar."));
       return;
     }
 
@@ -406,7 +371,9 @@ void loop() {
     return;
   }
 
+  // --------------------------------------------------------
   // Entrada no modo LOAD
+  // --------------------------------------------------------
   if (modoLOAD) {
     if (tecla == 'B') {
       Serial.println();
@@ -429,6 +396,33 @@ void loop() {
     else if (tecla >= '0' && tecla <= '9') {
       bufferEntrada += tecla;
       Serial.print(tecla);
+    }
+  }
+}
+
+// ============================================================
+// SENSOR CONTÍNUO NO SERIAL
+// Função usada somente quando sensorContinuo == true
+// ============================================================
+
+void atualizarSensorSerial() {
+  unsigned long agora = millis();
+
+  if (agora - ultimaLeituraSensor >= intervaloSensor) {
+    ultimaLeituraSensor = agora;
+
+    int distancia = lerDistancia();
+
+    Serial.print(F("[SENSOR CONTINUO] Distancia atual: "));
+    Serial.print(distancia);
+    Serial.print(F(" cm | Buzzer: "));
+
+    if (distancia < 10) {
+      ligarBuzzer();
+      Serial.println(F("LIGADO"));
+    } else {
+      desligarBuzzer();
+      Serial.println(F("desligado"));
     }
   }
 }
@@ -551,19 +545,41 @@ void displayMenos() {
 
 void ligarLED(int num) {
   switch (num) {
-    case 1: digitalWrite(LED1, HIGH); break;
-    case 2: digitalWrite(LED2, HIGH); break;
-    case 3: digitalWrite(LED3, HIGH); break;
-    default: printErro(F("LED invalido. Use 1, 2 ou 3.")); break;
+    case 1:
+      digitalWrite(LED1, HIGH);
+      break;
+
+    case 2:
+      digitalWrite(LED2, HIGH);
+      break;
+
+    case 3:
+      digitalWrite(LED3, HIGH);
+      break;
+
+    default:
+      printErro(F("LED invalido. Use 1, 2 ou 3."));
+      break;
   }
 }
 
 void desligarLED(int num) {
   switch (num) {
-    case 1: digitalWrite(LED1, LOW); break;
-    case 2: digitalWrite(LED2, LOW); break;
-    case 3: digitalWrite(LED3, LOW); break;
-    default: printErro(F("LED invalido. Use 1, 2 ou 3.")); break;
+    case 1:
+      digitalWrite(LED1, LOW);
+      break;
+
+    case 2:
+      digitalWrite(LED2, LOW);
+      break;
+
+    case 3:
+      digitalWrite(LED3, LOW);
+      break;
+
+    default:
+      printErro(F("LED invalido. Use 1, 2 ou 3."));
+      break;
   }
 }
 
@@ -588,19 +604,19 @@ int lerDistancia() {
 
   digitalWrite(TRIG, LOW);
 
-  long dur = pulseIn(ECHO, HIGH, 30000UL);
+  long duracao = pulseIn(ECHO, HIGH, 30000UL);
 
-  if (dur == 0) {
+  if (duracao == 0) {
     return 400;
   }
 
-  int d = (int)(dur / 58);
+  int distancia = (int)(duracao / 58);
 
-  if (d < 1 || d > 400) {
+  if (distancia <= 0 || distancia > 400) {
     return 400;
   }
 
-  return d;
+  return distancia;
 }
 
 // ============================================================
@@ -643,7 +659,7 @@ String decodificarLinha(String linha) {
     opDec = linha.toInt();
   } else {
     opDec = linha.substring(0, espaco).toInt();
-    oper  = linha.substring(espaco + 1).toInt();
+    oper = linha.substring(espaco + 1).toInt();
   }
 
   String mnem;
@@ -758,23 +774,17 @@ void executarInstrucao(String instrucao) {
   PC++;
 
   switch (IR) {
-
     case OP_NOP:
       printInfo(F("NOP - nenhuma operacao."));
       break;
 
-    // --------------------------------------------------------
-    // READ: ativa streaming contínuo de distância (1-400 cm)
-    // Pressione 0 para parar o streaming
-    // --------------------------------------------------------
     case OP_READ: {
-      sensorStream = true;
-      ultimaLeituraStream = 0; // força leitura imediata
+      int d = lerDistancia();
+      ACC = d;
 
-      printLinha('-', 52);
-      Serial.println(F("  [READ] Streaming de distancia INICIADO."));
-      Serial.println(F("  Range: 1 a 400 cm | Pressione 0 para parar."));
-      printLinha('-', 52);
+      Serial.print(F("  [READ] -> "));
+      Serial.print(d);
+      Serial.println(F(" cm -> ACC"));
       break;
     }
 
@@ -783,6 +793,7 @@ void executarInstrucao(String instrucao) {
         printErro(F("LOADK requer operando."));
         break;
       }
+
       ACC = operando;
       break;
 
@@ -791,6 +802,7 @@ void executarInstrucao(String instrucao) {
         printErro(F("ADDK requer operando."));
         break;
       }
+
       ACC += operando;
       break;
 
@@ -799,6 +811,7 @@ void executarInstrucao(String instrucao) {
         printErro(F("SUBK requer operando."));
         break;
       }
+
       ACC -= operando;
       break;
 
@@ -807,7 +820,9 @@ void executarInstrucao(String instrucao) {
         printErro(F("CMPK requer operando."));
         break;
       }
+
       FLAG_Z = (ACC == operando);
+
       Serial.print(F("  [CMPK] ACC("));
       Serial.print(ACC);
       Serial.print(F(") == "));
@@ -821,7 +836,9 @@ void executarInstrucao(String instrucao) {
         printErro(F("LEDON: operando deve ser 1, 2 ou 3."));
         break;
       }
+
       ligarLED(operando);
+
       Serial.print(F("  [LEDON] -> LED "));
       Serial.print(operando);
       Serial.println(F(" LIGADO"));
@@ -832,7 +849,9 @@ void executarInstrucao(String instrucao) {
         printErro(F("LEDOFF: operando deve ser 1, 2 ou 3."));
         break;
       }
+
       desligarLED(operando);
+
       Serial.print(F("  [LEDOFF] -> LED "));
       Serial.print(operando);
       Serial.println(F(" DESLIGADO"));
@@ -852,9 +871,12 @@ void executarInstrucao(String instrucao) {
       if (operando >= 0) {
         ACC = operando;
       }
+
       mostrarDisplay(ACC);
+
       Serial.print(F("  [DISP] -> ACC = "));
       Serial.print(ACC);
+
       if (ACC > 9) {
         Serial.println(F(" | OVERFLOW: mostra E"));
       } else if (ACC < 0) {
@@ -862,36 +884,50 @@ void executarInstrucao(String instrucao) {
       } else {
         Serial.println();
       }
+
       break;
 
     case OP_ALERT: {
       int d = lerDistancia();
+
       Serial.print(F("  [ALERT] -> "));
       Serial.print(d);
       Serial.print(F(" cm | "));
+
       if (d < 10) {
         ligarBuzzer();
-        ligarLED(1); ligarLED(2); ligarLED(3);
+        ligarLED(1);
+        ligarLED(2);
+        ligarLED(3);
         Serial.println(F("PERIGO: buzzer + LEDs ligados"));
-      } else if (d < 20) {
+      } 
+      else if (d < 20) {
         desligarBuzzer();
-        ligarLED(1); ligarLED(2); ligarLED(3);
+        ligarLED(1);
+        ligarLED(2);
+        ligarLED(3);
         Serial.println(F("ALERTA: LEDs ligados"));
-      } else {
+      } 
+      else {
         desligarBuzzer();
-        desligarLED(1); desligarLED(2); desligarLED(3);
+        desligarLED(1);
+        desligarLED(2);
+        desligarLED(3);
         Serial.println(F("SEGURO: saidas desligadas"));
       }
+
       break;
     }
 
     case OP_BINC: {
       char bin[5];
+
       bin[0] = ((IR >> 3) & 1) ? '1' : '0';
       bin[1] = ((IR >> 2) & 1) ? '1' : '0';
       bin[2] = ((IR >> 1) & 1) ? '1' : '0';
       bin[3] = (IR & 1) ? '1' : '0';
       bin[4] = '\0';
+
       Serial.print(F("  [BINC] -> IR = "));
       Serial.print(IR);
       Serial.print(F(" ("));
@@ -905,7 +941,9 @@ void executarInstrucao(String instrucao) {
         printErro(F("STORE: endereco invalido. Use 0 a 15."));
         break;
       }
+
       MEM[operando] = ACC;
+
       Serial.print(F("  [STORE] -> MEM["));
       Serial.print(operando);
       Serial.print(F("] = "));
@@ -917,7 +955,9 @@ void executarInstrucao(String instrucao) {
         printErro(F("LOADM: endereco invalido. Use 0 a 15."));
         break;
       }
+
       ACC = MEM[operando];
+
       Serial.print(F("  [LOADM] -> ACC = MEM["));
       Serial.print(operando);
       Serial.print(F("] = "));
@@ -927,7 +967,7 @@ void executarInstrucao(String instrucao) {
     case OP_HALT:
       EXECUTANDO = false;
       modoRUN = false;
-      sensorStream = false;
+
       printLinha('=', 52);
       Serial.println(F("  [HALT] Execucao encerrada."));
       Serial.println(F("  Pressione A para reiniciar."));
@@ -958,19 +998,33 @@ void executarInstrucao(String instrucao) {
 
 void imprimirEstado(int pcExec, String instrExec) {
   char bin[5];
+
   bin[0] = ((IR >> 3) & 1) ? '1' : '0';
   bin[1] = ((IR >> 2) & 1) ? '1' : '0';
   bin[2] = ((IR >> 1) & 1) ? '1' : '0';
   bin[3] = (IR & 1) ? '1' : '0';
   bin[4] = '\0';
 
-  Serial.print(F("  PC: "));    Serial.print(pcExec);
-  Serial.print(F(" | IR: "));   Serial.print(instrExec);
-  Serial.print(F(" | OPCODE: ")); Serial.print(bin);
-  Serial.print(F(" | ACC: "));  Serial.print(ACC);
-  Serial.print(F(" | FLAG_Z: ")); Serial.print(FLAG_Z ? 1 : 0);
-  Serial.print(F(" | MEM[0]: ")); Serial.print(MEM[0]);
-  Serial.print(F(" | MEM[1]: ")); Serial.println(MEM[1]);
+  Serial.print(F("  PC: "));
+  Serial.print(pcExec);
+
+  Serial.print(F(" | IR: "));
+  Serial.print(instrExec);
+
+  Serial.print(F(" | OPCODE: "));
+  Serial.print(bin);
+
+  Serial.print(F(" | ACC: "));
+  Serial.print(ACC);
+
+  Serial.print(F(" | FLAG_Z: "));
+  Serial.print(FLAG_Z ? 1 : 0);
+
+  Serial.print(F(" | MEM[0]: "));
+  Serial.print(MEM[0]);
+
+  Serial.print(F(" | MEM[1]: "));
+  Serial.println(MEM[1]);
 }
 
 // ============================================================
@@ -979,7 +1033,11 @@ void imprimirEstado(int pcExec, String instrExec) {
 
 void printLinha(char c, int n) {
   Serial.print(F("  "));
-  for (int i = 0; i < n; i++) Serial.print(c);
+
+  for (int i = 0; i < n; i++) {
+    Serial.print(c);
+  }
+
   Serial.println();
 }
 
@@ -1017,8 +1075,7 @@ void imprimirAjuda() {
   Serial.println(F("   B   ENTER - confirma instrucao no LOAD"));
   Serial.println(F("   C   ESPACO - separa opcode do operando"));
   Serial.println(F("   D   BACKSPACE - apaga ultimo digito"));
-  Serial.println(F("   0   Para streaming de READ OU liga/desliga"));
-  Serial.println(F("       sensor de buzzer automatico (fora do LOAD)"));
+  Serial.println(F("   0   Liga/desliga sensor continuo + buzzer automatico"));
   Serial.println();
   Serial.println(F("  EXEMPLOS"));
   Serial.println(F("  --------------------------------------------------"));
@@ -1031,10 +1088,10 @@ void imprimirAjuda() {
   Serial.println(F("   Ligar buzzer:"));
   Serial.println(F("   # 8 B 15 B # A * *"));
   Serial.println();
-  Serial.println(F("   Streaming de distancia (1-400 cm):"));
-  Serial.println(F("   # 1 B 10 B 15 B # A *"));
-  Serial.println(F("   -> Pressione 0 para parar o streaming."));
+  Serial.println(F("   Ler sensor e mostrar no display UMA VEZ:"));
+  Serial.println(F("   # 1 B 10 B 15 B # A * * *"));
   printLinha('=', 52);
   Serial.println(F("  Pressione # para comecar o LOAD."));
+  Serial.println(F("  Pressione 0 para ligar/desligar o sensor continuo."));
   printLinha('=', 52);
 }
